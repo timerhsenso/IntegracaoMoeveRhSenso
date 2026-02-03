@@ -18,12 +18,25 @@ public class Program
 
     public static async Task<int> Main(string[] args)
     {
+        // ✅ VERIFICAR --help ANTES DE TUDO
+        if (args.Any(a => a.Equals("--help", StringComparison.OrdinalIgnoreCase) ||
+                          a.Equals("-h", StringComparison.OrdinalIgnoreCase) ||
+                          a.Equals("/?", StringComparison.OrdinalIgnoreCase)))
+        {
+            ShowHelp();
+            return 0;
+        }
+
+        // ✅ VERIFICAR --checkdb ANTES DE TUDO
+        if (args.Any(a => a.Equals("--checkdb", StringComparison.OrdinalIgnoreCase)))
+        {
+            return await CheckDatabaseConnection();
+        }
+
         try
         {
-            // ✅ PRIMEIRA COISA: VERIFICAR --help (SEM TOCAR EM NADA)
             var arguments = ArgumentParser.Parse(args);
 
-            // ✅ SÓ CONFIGURA O RESTO SE NÃO FOR --help
             ConfigureLogging();
             ConfigureServices();
             await EnsureDatabaseMigrated();
@@ -67,6 +80,261 @@ public class Program
         {
             Log.CloseAndFlush();
         }
+    }
+
+    private static async Task<int> CheckDatabaseConnection()
+    {
+        Console.WriteLine();
+        Console.WriteLine("╔══════════════════════════════════════════════════════════════════════════════╗");
+        Console.WriteLine("║              VERIFICAÇÃO DE CONEXÃO COM BANCO DE DADOS                       ║");
+        Console.WriteLine("╚══════════════════════════════════════════════════════════════════════════════╝");
+        Console.WriteLine();
+
+        try
+        {
+            // Configurar apenas o essencial
+            var builder = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: false)
+                .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true);
+
+            _configuration = builder.Build();
+
+            var connectionString = _configuration.GetConnectionString("CEPSA");
+
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("❌ Connection String 'CEPSA' não encontrada no appsettings.json");
+                Console.ResetColor();
+                return 1;
+            }
+
+            Console.WriteLine("📋 Connection String encontrada:");
+            Console.WriteLine($"   {MaskConnectionString(connectionString)}");
+            Console.WriteLine();
+
+            // Criar DbContext
+            var services = new ServiceCollection();
+            services.AddDbContext<CEPSADbContext>(options =>
+                options.UseSqlServer(connectionString));
+
+            _serviceProvider = services.BuildServiceProvider();
+
+            using var scope = _serviceProvider.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<CEPSADbContext>();
+
+            // Teste 1: Conectar ao banco
+            Console.Write("🔌 Testando conexão com o banco... ");
+            var stopwatch = Stopwatch.StartNew();
+            var canConnect = await dbContext.Database.CanConnectAsync();
+            stopwatch.Stop();
+
+            if (!canConnect)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"FALHOU ({stopwatch.ElapsedMilliseconds}ms)");
+                Console.ResetColor();
+                return 1;
+            }
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"OK ({stopwatch.ElapsedMilliseconds}ms)");
+            Console.ResetColor();
+
+            // Teste 2: Executar query simples
+            Console.Write("📊 Executando SELECT 1... ");
+            stopwatch.Restart();
+            await dbContext.Database.ExecuteSqlRawAsync("SELECT 1");
+            stopwatch.Stop();
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"OK ({stopwatch.ElapsedMilliseconds}ms)");
+            Console.ResetColor();
+
+            // Teste 3: Verificar migrations
+            Console.Write("🔄 Verificando migrations... ");
+            var pendingMigrations = await dbContext.Database.GetPendingMigrationsAsync();
+            var appliedMigrations = await dbContext.Database.GetAppliedMigrationsAsync();
+
+            if (pendingMigrations.Any())
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"PENDENTE ({pendingMigrations.Count()} migration(s))");
+                Console.ResetColor();
+                Console.WriteLine();
+                Console.WriteLine("   Migrations pendentes:");
+                foreach (var migration in pendingMigrations)
+                {
+                    Console.WriteLine($"   - {migration}");
+                }
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"OK ({appliedMigrations.Count()} migration(s) aplicada(s))");
+                Console.ResetColor();
+            }
+
+            // Teste 4: Verificar tabelas principais
+            Console.WriteLine();
+            Console.WriteLine("📁 Verificando tabelas principais:");
+
+            var tables = new[]
+            {
+                "sapsf_DatosSindicales",
+                "sapsf_EmpJob",
+                "sapsf_PerAddress",
+                "sapsf_PerEmail",
+                "sapsf_PerPerson",
+                "sapsf_PerPersonal",
+                "sapsf_PerPhone",
+                "IntegrationExecutionLog"
+            };
+
+            var allTablesExist = true;
+            var connection = dbContext.Database.GetDbConnection();
+            await connection.OpenAsync();
+
+            foreach (var tableName in tables)
+            {
+                try
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandText = $"SELECT COUNT(*) FROM [{tableName}]";
+                    var result = await command.ExecuteScalarAsync();
+                    var count = Convert.ToInt32(result);
+
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine($"   ✓ {tableName,-30} {count,10:N0} registro(s)");
+                    Console.ResetColor();
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"   ✗ {tableName,-30} ERRO: {ex.Message}");
+                    Console.ResetColor();
+                    allTablesExist = false;
+                }
+            }
+
+            await connection.CloseAsync();
+
+            Console.WriteLine();
+            Console.WriteLine("╔══════════════════════════════════════════════════════════════════════════════╗");
+
+            if (allTablesExist && !pendingMigrations.Any())
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("║                   ✓ BANCO DE DADOS CONFIGURADO CORRETAMENTE                 ║");
+                Console.ResetColor();
+                Console.WriteLine("╚══════════════════════════════════════════════════════════════════════════════╝");
+                Console.WriteLine();
+                return 0;
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("║              ⚠️  BANCO DE DADOS COM PROBLEMAS - VERIFIQUE ACIMA              ║");
+                Console.ResetColor();
+                Console.WriteLine("╚══════════════════════════════════════════════════════════════════════════════╝");
+                Console.WriteLine();
+
+                if (pendingMigrations.Any())
+                {
+                    Console.WriteLine("💡 Execute o programa normalmente para aplicar as migrations pendentes.");
+                    Console.WriteLine();
+                }
+
+                return 1;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("❌ ERRO AO VERIFICAR BANCO DE DADOS:");
+            Console.WriteLine($"   {ex.Message}");
+            Console.ResetColor();
+            Console.WriteLine();
+
+            if (ex.InnerException != null)
+            {
+                Console.WriteLine("Detalhes:");
+                Console.WriteLine($"   {ex.InnerException.Message}");
+                Console.WriteLine();
+            }
+
+            return 1;
+        }
+    }
+
+    private static string MaskConnectionString(string connectionString)
+    {
+        // Mascara senha na connection string para exibição
+        var parts = connectionString.Split(';');
+        var masked = parts.Select(part =>
+        {
+            if (part.Trim().StartsWith("Password=", StringComparison.OrdinalIgnoreCase) ||
+                part.Trim().StartsWith("Pwd=", StringComparison.OrdinalIgnoreCase))
+            {
+                var key = part.Split('=')[0];
+                return $"{key}=********";
+            }
+            return part;
+        });
+
+        return string.Join(";", masked);
+    }
+
+    private static void ShowHelp()
+    {
+        Console.WriteLine();
+        Console.WriteLine("╔══════════════════════════════════════════════════════════════════════════════╗");
+        Console.WriteLine("║                    INTEGRAÇÃO CEPSA BRASIL - AJUDA                           ║");
+        Console.WriteLine("╚══════════════════════════════════════════════════════════════════════════════╝");
+        Console.WriteLine();
+        Console.WriteLine("USO:");
+        Console.WriteLine("  IntegracaoCepsaBrasil.exe [TableName] [Date]");
+        Console.WriteLine();
+        Console.WriteLine("PARÂMETROS:");
+        Console.WriteLine("  TableName    Nome da tabela a importar (opcional)");
+        Console.WriteLine("               Valores aceitos:");
+        Console.WriteLine("                 - AllTables (padrão se omitido)");
+        Console.WriteLine("                 - DatosSindicales");
+        Console.WriteLine("                 - EmpJob");
+        Console.WriteLine("                 - PerAddressDEFLT");
+        Console.WriteLine("                 - PerEmail");
+        Console.WriteLine("                 - PerPerson");
+        Console.WriteLine("                 - PerPersonal");
+        Console.WriteLine("                 - PerPhone");
+        Console.WriteLine();
+        Console.WriteLine("  Date         Data de referência no formato DD/MM/YYYY (opcional)");
+        Console.WriteLine("               Padrão: Data atual");
+        Console.WriteLine();
+        Console.WriteLine("EXEMPLOS:");
+        Console.WriteLine("  IntegracaoCepsaBrasil.exe");
+        Console.WriteLine("    Importa todas as tabelas com a data de hoje");
+        Console.WriteLine();
+        Console.WriteLine("  IntegracaoCepsaBrasil.exe AllTables 01/01/2026");
+        Console.WriteLine("    Importa todas as tabelas com a data 01/01/2026");
+        Console.WriteLine();
+        Console.WriteLine("  IntegracaoCepsaBrasil.exe PerEmail");
+        Console.WriteLine("    Importa apenas a tabela PerEmail com a data de hoje");
+        Console.WriteLine();
+        Console.WriteLine("  IntegracaoCepsaBrasil.exe EmpJob 15/12/2025");
+        Console.WriteLine("    Importa apenas a tabela EmpJob com a data 15/12/2025");
+        Console.WriteLine();
+        Console.WriteLine("OPÇÕES:");
+        Console.WriteLine("  --help, -h, /?    Exibe esta ajuda");
+        Console.WriteLine("  --checkdb         Verifica conexão com banco de dados");
+        Console.WriteLine();
+        Console.WriteLine("CÓDIGOS DE RETORNO:");
+        Console.WriteLine("  0 - Sucesso");
+        Console.WriteLine("  1 - Erro de validação ou conexão com banco");
+        Console.WriteLine("  3 - Sucesso parcial (uma ou mais tabelas falharam)");
+        Console.WriteLine("  4 - Erro crítico");
+        Console.WriteLine();
     }
 
     private static void ConfigureLogging()
