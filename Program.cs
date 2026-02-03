@@ -39,7 +39,7 @@ public class Program
 
             ConfigureLogging();
             ConfigureServices();
-            await EnsureDatabaseMigrated();
+            await EnsureDatabaseMigrated(); 
 
             var executor = _serviceProvider.GetRequiredService<TableExecutor>();
 
