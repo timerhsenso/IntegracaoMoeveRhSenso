@@ -39,7 +39,7 @@ public class Program
 
             ConfigureLogging();
             ConfigureServices();
-            await EnsureDatabaseMigrated(); 
+            await EnsureDatabaseMigrated();
 
             var executor = _serviceProvider.GetRequiredService<TableExecutor>();
 
@@ -386,6 +386,11 @@ public class Program
             client.Timeout = TimeSpan.FromMinutes(3);
         })
         .AddHttpMessageHandler<AuthenticationHandler>();
+
+        // ✅ Endpoint Routes — rotas configuráveis via appsettings.json (seção "EndpointRoutes")
+        var endpointRoutes = _configuration.GetSection("EndpointRoutes").Get<EndpointRoutesConfiguration>()
+            ?? new EndpointRoutesConfiguration();
+        services.AddSingleton(endpointRoutes);
 
         // CEPSA Repository
         services.AddScoped<ICEPSARESTRepository, CEPSARESTRepository>();

@@ -5,7 +5,7 @@ namespace IntegracaoCepsaBrasil.Data.Common;
 public record BaseModel
 {
     [Column("id")]
-    public decimal Id { get; set; }
+    public int Id { get; set; }
 
     [Column("date")]
     public DateTime Date { get; set; }

@@ -6,7 +6,7 @@ namespace IntegracaoCepsaBrasil.Data.Models;
 public record ExecutionLog
 {
     [Column("id")]
-    public int Id { get; set; }
+    public long Id { get; set; }
 
     [Column("executionDateTime")]
     public DateTime ExecutionDateTime { get; set; }
